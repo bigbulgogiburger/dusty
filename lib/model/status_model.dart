@@ -32,7 +32,7 @@ class StatusModel {
   final double minUltraFindDust;
 
   // 오존 최소치
-  final double min03;
+  final double minO3;
 
   // 이산화질소 최소치
   final double minNO2;
@@ -73,7 +73,7 @@ class StatusModel {
     required this.minUltraFindDust,
 
     // 오존 최소치
-    required this.min03,
+    required this.minO3,
     // 이산화질소 최소치
     required this.minNO2,
 
