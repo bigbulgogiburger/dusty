@@ -1,5 +1,6 @@
-import 'package:dusty/component/category_card.dart';
-import 'package:dusty/component/hourly_card.dart';
+import 'package:dio/dio.dart';
+import 'package:dusty/container/category_card.dart';
+import 'package:dusty/container/hourly_card.dart';
 import 'package:dusty/component/main_app_bar.dart';
 import 'package:dusty/component/main_drawer.dart';
 import 'package:dusty/const/colors.dart';
@@ -9,14 +10,13 @@ import 'package:dusty/model/stat_model.dart';
 import 'package:dusty/repository/stat_repository.dart';
 import 'package:dusty/utils/data_utils.dart';
 import 'package:flutter/material.dart';
+import 'package:hive_flutter/hive_flutter.dart';
 
 class HomeScreen extends StatefulWidget {
   HomeScreen({super.key});
 
   @override
   State<HomeScreen> createState() => _HomeScreenState();
-
-
 }
 
 class _HomeScreenState extends State<HomeScreen> {
@@ -25,11 +25,11 @@ class _HomeScreenState extends State<HomeScreen> {
   ScrollController scrollController = ScrollController();
 
   @override
-  void initState(){
+  void initState() {
     super.initState();
     scrollController.addListener(scrollListener);
+    fetchData();
   }
-
 
   @override
   void dispose() {
@@ -38,73 +38,98 @@ class _HomeScreenState extends State<HomeScreen> {
     scrollController.dispose();
     super.dispose();
   }
-  @override
-  Future<Map<ItemCode, List<StatModel>>> fetchData() async {
-    Map<ItemCode, List<StatModel>> stats = {};
 
-    List<Future> futures = [];
+  Future<void> fetchData() async {
+    try {
+      final now = DateTime.now().add(Duration(hours: 9));
+      final fetchTime = DateTime(now.year, now.month, now.day, now.hour);
 
-    for (ItemCode itemCode in ItemCode.values) {
-      futures.add(StatRepository.fetchData(itemCode: itemCode));
+      final box = Hive.box<StatModel>(ItemCode.PM10.name);
+
+      if (box.values.isNotEmpty &&
+          (box.values.last as StatModel).dataTime.isAtSameMomentAs(fetchTime)) {
+        print('이미 최신 데이터가 있습니다.');
+        return;
+      }
+      List<Future> futures = [];
+
+      for (ItemCode itemCode in ItemCode.values) {
+        futures.add(StatRepository.fetchData(itemCode: itemCode));
+      }
+
+      //이렇게 하면 한번에 기다릴 수 있음
+      final result = await Future.wait(futures);
+
+      // hive에 데이터 넣기.
+      for (int i = 0; i < result.length; i++) {
+        // ItemCode
+        final key = ItemCode.values[i];
+        // List<StatModel>
+        final value = result[i];
+
+        final box = Hive.box<StatModel>(key.name);
+
+        for (StatModel stat in value) {
+          box.put(stat.dataTime.toString(), stat);
+        }
+
+        final allKeys = box.keys.toList();
+
+        if (allKeys.length > 24) {
+          final deleteKeys = allKeys.sublist(0, allKeys.length - 24);
+          box.deleteAll(deleteKeys);
+        }
+      }
+    } on DioException catch (e) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('인터넷 연결이 원활하지 않습니다.'),
+        ),
+      );
     }
 
-    //이렇게 하면 한번에 기다릴 수 있음
-    final result = await Future.wait(futures);
-    for (int i = 0; i < result.length; i++) {
-      final key = ItemCode.values[i];
-      final value = result[i];
-      stats.addAll({key: value});
-    }
-
-    return stats;
+    //
+    // return ItemCode.values.fold<Map<ItemCode,List<StatModel>>>({}, (previousValue, itemCode) {
+    //   final box = Hive.box<StatModel>(itemCode.name);
+    //   previousValue.addAll({
+    //     itemCode : box.values.toList()
+    //   });
+    //   return previousValue;
+    // });
   }
 
-  scrollListener(){
-    bool isExpanded = scrollController.offset <500 -kToolbarHeight;
+  scrollListener() {
+    bool isExpanded = scrollController.offset < 500 - kToolbarHeight;
 
-    if(isExpanded != this.isExpanded){
+    if (isExpanded != this.isExpanded) {
       setState(() {
         this.isExpanded = isExpanded;
       });
     }
   }
+
   @override
   Widget build(BuildContext context) {
-    return FutureBuilder<Map<ItemCode, List<StatModel>>>(
-        future: fetchData(),
-        builder: (context, snapshot) {
-          if (snapshot.hasError) {
-            return Scaffold(
-              body: Center(
-                child: Text('에러가 있습니다.'),
-              ),
-            );
-          }
-          if (!snapshot.hasData) {
+    return ValueListenableBuilder<Box>(
+        valueListenable: Hive.box<StatModel>(ItemCode.PM10.name).listenable(),
+        builder: (context, box, widget) {
+          //PM10 (미세먼지)
+          //
+          if (box.values.isEmpty) {
             return Scaffold(
               body: Center(
                 child: CircularProgressIndicator(),
               ),
             );
           }
-          Map<ItemCode, List<StatModel>> stats = snapshot.data!;
-          StatModel pm10RecentStat = stats[ItemCode.PM10]![0];
 
-          // 1 - 5, 6 - 10, 11 - 15
-          // 7
-          // 미세먼지 최근 데이터
+          final recentStat = box.values.toList().last;
+
           final status = DataUtils.getStatusFromItemCodeAndValue(
-              value: pm10RecentStat.seoul, itemCode: ItemCode.PM10);
+            value: recentStat.getLevelFromRegion(region),
+            itemCode: ItemCode.PM10,
+          );
 
-          final ssModel = stats.keys.map((key) {
-            final value = stats[key];
-            final stat = value![0];
-            return StatAndStatusModel(
-                itemCode: key,
-                status: DataUtils.getStatusFromItemCodeAndValue(
-                    value: stat.getLevelFromRegion(region), itemCode: key),
-                stat: stat);
-          }).toList();
           return Scaffold(
               drawer: MainDrawer(
                 darkColor: status.darkColor,
@@ -117,55 +142,56 @@ class _HomeScreenState extends State<HomeScreen> {
                   Navigator.of(context).pop();
                 },
               ),
-              body:Container(
+              body: Container(
                 color: status.primaryColor,
-                child: CustomScrollView(
-                  controller: scrollController,
-                  slivers: [
-                    MainAppBar(
-                      isExpanded: isExpanded,
-                      region: region,
-                      stat: pm10RecentStat,
-                      status: status,
-                      dateTime: pm10RecentStat.dataTime,
-                    ),
-                    // slivertobox하면 sliver하지 않은 위젯도 넣을 수 있음
-                    SliverToBoxAdapter(
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.stretch,
-                        children: [
-                          CategoryCard(
-                            models: ssModel,
-                            region: region,
-                            darkColor: status.darkColor,
-                            lightColor: status.lightColor,
-                          ),
-                          const SizedBox(
-                            height: 16.0,
-                          ),
-                          //List 안에 list -> cascadeOperator
-                          ...stats.keys.map((itemCode) {
-                            final stat = stats[itemCode]!;
-                            return Padding(
-                              padding: const EdgeInsets.only(bottom: 16.0),
-                              child: HourlyCard(
-                                category: DataUtils.getItemCodeKrString(itemCode: itemCode),
-                                stats: stat!,
-                                region: region,
-                                darkColor: status.darkColor,
-                                lightColor: status.lightColor,
-                              ),
-                            );}).toList(),
-                          const SizedBox(
-                            height: 16.0,
-                          ),
-                        ],
+                child: RefreshIndicator(
+                  onRefresh: () async {
+                    await fetchData();
+                  },
+                  child: CustomScrollView(
+                    controller: scrollController,
+                    slivers: [
+                      MainAppBar(
+                        isExpanded: isExpanded,
+                        region: region,
+                        stat: recentStat,
+                        status: status,
+                        dateTime: recentStat.dataTime,
                       ),
-                    )
-                  ],
+                      // slivertobox하면 sliver하지 않은 위젯도 넣을 수 있음
+                      SliverToBoxAdapter(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.stretch,
+                          children: [
+                            CategoryCard(
+                              region: region,
+                              darkColor: status.darkColor,
+                              lightColor: status.lightColor,
+                            ),
+                            const SizedBox(
+                              height: 16.0,
+                            ),
+                            //List 안에 list -> cascadeOperator
+                            ...ItemCode.values.map((itemCode) {
+                              return Padding(
+                                padding: const EdgeInsets.only(bottom: 16.0),
+                                child: HourlyCard(
+                                    region: region,
+                                    darkColor: status.darkColor,
+                                    lightColor: status.lightColor,
+                                    itemCode: itemCode),
+                              );
+                            }).toList(),
+                            const SizedBox(
+                              height: 16.0,
+                            ),
+                          ],
+                        ),
+                      )
+                    ],
+                  ),
                 ),
-              )
-          );
+              ));
         });
   }
 }
